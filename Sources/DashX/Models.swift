@@ -44,11 +44,6 @@ public struct MuxPlaybackData: Codable {
     public var policy: String?
 }
 
-//public struct AssetResponse: Codable {
-//    public var uploadStatus: String?
-//    public var data: AssetData?
-//}
-
 public struct AssetResponse: Codable {
     public struct AssetDataResponse: Codable {
         public var assetData: AssetData?
