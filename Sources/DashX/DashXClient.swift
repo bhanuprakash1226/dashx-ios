@@ -343,40 +343,57 @@ public class DashXClient {
 
     // MARK: - Core (File Uploads)
 
-    public func uploadExternalAsset(
+    public func uploadAsset(
         fileURL: URL,
-        externalColumnId: String,
+        resource: String,
+        attribute: String,
         successCallback: @escaping SuccessCallback,
         failureCallback: @escaping FailureCallback
     ) {
-        self.prepareExternalAsset(externalColumnId: externalColumnId) { response in
-            if let prepareExternalAssetResponse = response as? PrepareExternalAssetResponse,
-               let urlString = prepareExternalAssetResponse.data?.upload?.url,
-               let assetId = prepareExternalAssetResponse.id,
-               let url = URL(string: urlString) {
+        let fileName = fileURL.lastPathComponent
+        var fileSize : UInt64 = 0
 
-                var uploadAssetRequest = URLRequest(url: url)
-                uploadAssetRequest.httpMethod = HttpMethod.put.rawValue
-                uploadAssetRequest.setValue(fileURL.mimeType(), forHTTPHeaderField: Constants.CONTENT_TYPE)
-                uploadAssetRequest.setValue(prepareExternalAssetResponse.data?.upload?.headers?[Constants.GCS_ASSET_UPLOAD_HEADER_KEY], forHTTPHeaderField: Constants.GCS_ASSET_UPLOAD_HEADER_KEY)
-
-                do {
-                    let fileData = try Data(contentsOf: fileURL)
-                    URLSession.shared.uploadTask(with: uploadAssetRequest, from: fileData) { data, response, error in
-                        guard error == nil else {
-                            return failureCallback(error!)
-                        }
-                        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                            return failureCallback(DashXClientError.assetIsNotUploaded)
-                        }
-                        self.pollTillAssetIsReady(trysLeft: 5, assetId: assetId) { response in
-                            successCallback(response)
-                        } failureCallback: { error in
+        do {
+            let attr = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+           fileSize = attr[FileAttributeKey.size] as! UInt64
+        } catch {
+            print("FileSize Error: \(error)")
+            return
+        }
+        
+        let mimeType = fileURL.mimeType()
+        
+        self.prepareAsset(resource: resource, attribute: attribute, name: fileName, size: Int(fileSize), mimeType: mimeType) { response in
+            if let prepareAssetResponse = response as? PrepareAssetResponse,
+               let rawUploadData = prepareAssetResponse.data?.upload as? UploadData {
+                if case .gcs(let uploadData) =  rawUploadData {
+                    if let urlString = uploadData.url,
+                       let assetId = prepareAssetResponse.id,
+                       let url = URL(string: urlString) {
+                        var uploadAssetRequest = URLRequest(url: url)
+                        uploadAssetRequest.httpMethod = HttpMethod.put.rawValue
+                        uploadAssetRequest.setValue(fileURL.mimeType(), forHTTPHeaderField: Constants.CONTENT_TYPE)
+                        uploadAssetRequest.setValue(uploadData.headers?[Constants.GCS_ASSET_UPLOAD_HEADER_KEY], forHTTPHeaderField: Constants.GCS_ASSET_UPLOAD_HEADER_KEY)
+                        
+                        do {
+                            let fileData = try Data(contentsOf: fileURL)
+                            URLSession.shared.uploadTask(with: uploadAssetRequest, from: fileData) { data, response, error in
+                                guard error == nil else {
+                                    return failureCallback(error!)
+                                }
+                                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                                    return failureCallback(DashXClientError.assetIsNotUploaded)
+                                }
+                                self.pollTillAssetIsReady(trysLeft: 5, assetId: assetId) { response in
+                                    successCallback(response)
+                                } failureCallback: { error in
+                                    failureCallback(error)
+                                }
+                            }.resume()
+                        } catch {
                             failureCallback(error)
                         }
-                    }.resume()
-                } catch {
-                    failureCallback(error)
+                    }
                 }
             } else {
                 failureCallback(DashXClientError.assetIsNotUploaded)
@@ -386,26 +403,30 @@ public class DashXClient {
         }
     }
 
-    private func prepareExternalAsset(
-        externalColumnId: String,
+    private func prepareAsset(
+        resource: String,
+        attribute: String,
+        name: String,
+        size: Int,
+        mimeType: String,
         successCallback: @escaping SuccessCallback,
         failureCallback: @escaping FailureCallback
     ) {
-        let prepareExternalAssetInput = DashXGql.PrepareExternalAssetInput(externalColumnId: externalColumnId)
+        let prepareExternalAssetInput = DashXGql.PrepareAssetInput(resource: resource, attribute: attribute, name: name, size: size, mimeType: mimeType)
 
         DashXLog.d(tag: #function, "Calling prepareExternalAsset with \(prepareExternalAssetInput)")
 
-        let prepareExternalAssetMutation = DashXGql.PrepareExternalAssetMutation(input: prepareExternalAssetInput)
+        let prepareExternalAssetMutation = DashXGql.PrepareAssetMutation(input: prepareExternalAssetInput)
 
         Network.shared.apollo.perform(mutation: prepareExternalAssetMutation) { result in
             switch result {
             case .success(let graphQLResult):
-                let json = graphQLResult.data?.prepareExternalAsset
+                let json = graphQLResult.data?.prepareAsset
                 DashXLog.d(tag: #function, "Sent prepareExternalAsset with \(String(describing: json))")
                 if let jsonDictionary = json?.resultMap.jsonValue as? [String: Any] {
                     do {
                         let json = try JSONSerialization.data(withJSONObject: jsonDictionary)
-                        let data = try JSONDecoder().decode(PrepareExternalAssetResponse.self, from: json)
+                        let data = try JSONDecoder().decode(PrepareAssetResponse.self, from: json)
                         successCallback(data)
                     } catch {
                         failureCallback(error)
@@ -426,9 +447,9 @@ public class DashXClient {
         successCallback: @escaping SuccessCallback,
         failureCallback: @escaping FailureCallback
     ) {
-        self.externalAsset(assetId: assetId) { response in
-            if let response = response as? ExternalAssetResponse,
-               let status = response.status {
+        self.asset(assetId: assetId) { response in
+            if let response = response as? AssetResponse,
+               let status = response.uploadStatus {
                 if status == "ready" || trysLeft == 0 {
                     successCallback(response)
                 } else {
@@ -442,32 +463,40 @@ public class DashXClient {
         }
     }
 
-    public func externalAsset(
+    public func asset(
         assetId: String,
         successCallback: @escaping SuccessCallback,
         failureCallback: @escaping FailureCallback
     ) {
-        DashXLog.d(tag: #function, "Calling externalAsset with \(assetId)")
+        DashXLog.d(tag: #function, "Calling asset query with \(assetId)")
 
-        let externalAssetQuery = DashXGql.ExternalAssetQuery(id: assetId)
+        let assetQuery = DashXGql.AssetQuery(id: assetId)
 
-        Network.shared.apollo.fetch(query: externalAssetQuery) { result in
+        Network.shared.apollo.fetch(query: assetQuery) { result in
             switch result {
             case .success(let graphQLResult):
-                let json = graphQLResult.data?.externalAsset
-                DashXLog.d(tag: #function, "Sent externalAsset with \(String(describing: json))")
+                let json = graphQLResult.data?.asset
+                
+                DashXLog.d(tag: #function, "Sent asset with \(String(describing: json))")
+
                 if let jsonDictionary = json?.resultMap.jsonValue as? [String: Any] {
                     do {
                         let json = try JSONSerialization.data(withJSONObject: jsonDictionary)
-                        var data = try JSONDecoder().decode(ExternalAssetResponse.self, from: json)
-                        if var assetData = data.data?.assetData,
-                           assetData.url == nil,
-                            let id = assetData.playbackIds?.first?.id {
-                            assetData.url = generateMuxVideoUrl(playbackId: id)
-                            data.data?.assetData = assetData
+                        var data = try JSONDecoder().decode(AssetResponse.self, from: json)
+
+                        if let assetData = data.data?.assetData,
+                           let rawUploadData = assetData.upload {
+                            if case .mux(var uploadData) = rawUploadData {
+                                if uploadData.url == nil,
+                                   let id = uploadData.playbackIds?.first?.id {
+                                    uploadData.url = generateMuxVideoUrl(playbackId: id)
+                                    data.data?.assetData?.upload = UploadData.mux(uploadData)
+                                }
+                            }
                         }
+
                         successCallback(data)
-                    } catch {
+                    } catch let error {
                         failureCallback(error)
                     }
                 } else {
